@@ -53,6 +53,24 @@ PREDICT2_VIDEO2WORLD_FSDP_2B = dict(
     ),
 )
 
+DZB_PREDICT2_VIDEO2WORLD_FSDP_2B = dict(
+    trainer=dict(
+        distributed_parallelism="fsdp",
+    ),
+    model=L(Predict2Video2WorldModel)(
+        config=Predict2Video2WorldModelConfig(
+            pipe_config=PREDICT2_VIDEO2WORLD_PIPELINE_2B,
+            model_manager_config=L(Predict2ModelManagerConfig)(
+                dit_path="checkpoints/nvidia/Cosmos-Predict2-2B-Video2World/model-480p-10fps.pt",
+                text_encoder_path="",  # Do not load text encoder for training.
+            ),
+            fsdp_shard_size=4,
+            high_sigma_ratio=0.05,
+        ),
+        _recursive_=False,
+    ),
+)
+
 # default 14b model config for predict2 video2world (720p, 16fps)
 PREDICT2_VIDEO2WORLD_FSDP_14B = dict(
     trainer=dict(
@@ -276,4 +294,10 @@ def register_model() -> None:
         package="_global_",
         name="predict2_video2world_fsdp_14b_720p_16fps",
         node=PREDICT2_VIDEO2WORLD_FSDP_14B_720P_16FPS,
+    )
+    cs.store(
+        group="model",
+        package="_global_",
+        name="dzb_predict2_video2world_fsdp_2b",
+        node=DZB_PREDICT2_VIDEO2WORLD_FSDP_2B,
     )

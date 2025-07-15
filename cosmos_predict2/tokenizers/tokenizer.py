@@ -625,7 +625,7 @@ def _video_vae(
     )
 
 
-class VAE:
+class VAE(nn.Module):
     def __init__(
         self,
         z_dim=16,
@@ -637,6 +637,7 @@ class VAE:
         is_amp=True,
         temporal_window: int = 4,
     ):
+        super().__init__()
         self.dtype = dtype
         self.device = device
         self.temporal_window = temporal_window
@@ -727,6 +728,7 @@ class VAE:
 
 class TokenizerInterface(VideoTokenizerInterface):
     def __init__(self, chunk_duration: int = 81, load_mean_std=False, **kwargs):
+        super().__init__()
         self.model = VAE(
             dtype=torch.bfloat16,
             is_amp=False,
@@ -735,6 +737,7 @@ class TokenizerInterface(VideoTokenizerInterface):
                 "vae_pth",
                 "",
             ),
+            device=kwargs['device'],
             temporal_window=kwargs.get("temporal_window", 4),
         )
         del kwargs

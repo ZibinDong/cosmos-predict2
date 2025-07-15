@@ -197,3 +197,12 @@ cython_debug/
 checkpoints/
 output/
 datasets/
+
+*.mp4
+*.png
+test*
+*.out
+*.jpg
+*.pkl
+*.lock
+lightning_logs/

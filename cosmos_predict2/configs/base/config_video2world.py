@@ -122,6 +122,96 @@ PREDICT2_VIDEO2WORLD_NET_2B = L(MinimalV1LVGDiT)(
     ),
 )
 
+PREDICT2_VIDEO2WORLD_NET_2B_DZB = L(MinimalV1LVGDiT)(
+    max_img_h=240,
+    max_img_w=240,
+    max_frames=128,
+    in_channels=16,
+    out_channels=16,
+    patch_spatial=2,
+    patch_temporal=1,
+    concat_padding_mask=True,
+    # attention settings
+    model_channels=2048,
+    num_blocks=28,
+    num_heads=16,
+    atten_backend="minimal_a2a",
+    # positional embedding settings
+    pos_emb_cls="rope3d",
+    pos_emb_learnable=True,
+    pos_emb_interpolation="crop",
+    use_adaln_lora=True,
+    adaln_lora_dim=256,
+    rope_h_extrapolation_ratio=3.0,
+    rope_w_extrapolation_ratio=3.0,
+    rope_t_extrapolation_ratio=1.0,
+    extra_per_block_abs_pos_emb=False,
+    rope_enable_fps_modulation=False,
+    sac_config=L(SACConfig)(
+        every_n_blocks=1,
+        mode="predict2_2b_720",
+    ),
+)
+
+PREDICT2_VIDEO2WORLD_PIPELINE_2B_DZB = Video2WorldPipelineConfig(
+    adjust_video_noise=True,
+    conditioner=L(Vid2VidConditioner)(
+        fps=L(ReMapkey)(
+            dropout_rate=0.0,
+            dtype=None,
+            input_key="fps",
+            output_key="fps",
+        ),
+        padding_mask=L(ReMapkey)(
+            dropout_rate=0.0,
+            dtype=None,
+            input_key="padding_mask",
+            output_key="padding_mask",
+        ),
+        text=L(TextAttr)(
+            dropout_rate=0.2,
+            input_key=["t5_text_embeddings"],
+        ),
+        use_video_condition=L(BooleanFlag)(
+            dropout_rate=0.0,
+            input_key="fps",
+            output_key="use_video_condition",
+        ),
+    ),
+    conditioning_strategy=str(ConditioningStrategy.FRAME_REPLACE),
+    min_num_conditional_frames=1,
+    max_num_conditional_frames=1,
+    net=PREDICT2_VIDEO2WORLD_NET_2B_DZB,
+    precision="bfloat16",
+    rectified_flow_t_scaling_factor=1.0,
+    resize_online=True,
+    resolution="480",
+    ema=L(EMAConfig)(enabled=False),  # defaults to inference
+    sigma_conditional=0.0001,
+    sigma_data=1.0,
+    state_ch=16,
+    state_t=8,
+    text_encoder_class="T5",
+    tokenizer=L(TokenizerInterface)(
+        chunk_duration=81,
+        # temporal_window=16,
+        load_mean_std=False,
+        name="tokenizer",
+        vae_pth="checkpoints/nvidia/Cosmos-Predict2-2B-Video2World/tokenizer/tokenizer.pth",
+    ),
+    prompt_refiner_config=CosmosReason1Config(
+        checkpoint_dir="checkpoints/nvidia/Cosmos-Reason1-7B",
+        offload_model_to_cpu=True,
+        enabled=False,
+    ),
+    guardrail_config=CosmosGuardrailConfig(
+        checkpoint_dir="checkpoints/",
+        offload_model_to_cpu=True,
+        enabled=False,
+    ),
+)
+
+
 PREDICT2_VIDEO2WORLD_PIPELINE_2B = Video2WorldPipelineConfig(
     adjust_video_noise=True,
     conditioner=L(Vid2VidConditioner)(
@@ -286,14 +376,20 @@ PREDICT2_VIDEO2WORLD_PIPELINE_2B_720P_16FPS = PREDICT2_VIDEO2WORLD_PIPELINE_2B
 
 # Cosmos Predict2 Video2World 14B pipeline config variants - resolution ["480", "720"] and fps [10, 16}]
 # 14B, resolution 480p, fps 10
-PREDICT2_VIDEO2WORLD_PIPELINE_14B_480P_10FPS = deepcopy(PREDICT2_VIDEO2WORLD_PIPELINE_14B)
+PREDICT2_VIDEO2WORLD_PIPELINE_14B_480P_10FPS = deepcopy(
+    PREDICT2_VIDEO2WORLD_PIPELINE_14B
+)
 PREDICT2_VIDEO2WORLD_PIPELINE_14B_480P_10FPS.resolution = "480"
 PREDICT2_VIDEO2WORLD_PIPELINE_14B_480P_10FPS.state_t = 16
 # 14B, resolution 480p, fps 16
-PREDICT2_VIDEO2WORLD_PIPELINE_14B_480P_16FPS = deepcopy(PREDICT2_VIDEO2WORLD_PIPELINE_14B)
+PREDICT2_VIDEO2WORLD_PIPELINE_14B_480P_16FPS = deepcopy(
+    PREDICT2_VIDEO2WORLD_PIPELINE_14B
+)
 PREDICT2_VIDEO2WORLD_PIPELINE_14B_480P_16FPS.resolution = "480"
 # 14B, resolution 720p, fps 10
-PREDICT2_VIDEO2WORLD_PIPELINE_14B_720P_10FPS = deepcopy(PREDICT2_VIDEO2WORLD_PIPELINE_14B)
+PREDICT2_VIDEO2WORLD_PIPELINE_14B_720P_10FPS = deepcopy(
+    PREDICT2_VIDEO2WORLD_PIPELINE_14B
+)
 PREDICT2_VIDEO2WORLD_PIPELINE_14B_720P_10FPS.state_t = 16
 # 14B, resolution 720p, fps 16
 PREDICT2_VIDEO2WORLD_PIPELINE_14B_720P_16FPS = PREDICT2_VIDEO2WORLD_PIPELINE_14B

@@ -20,8 +20,9 @@ from typing import Optional
 import torch
 
 
-class VideoTokenizerInterface(ABC):
+class VideoTokenizerInterface(torch.nn.Module):
     def __init__(self):
+        super().__init__()
         pass
 
     @abstractmethod
