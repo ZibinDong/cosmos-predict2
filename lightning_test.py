@@ -21,28 +21,6 @@ from cosmos_predict2.pipelines.video2world import Video2WorldPipeline
 from imaginaire.utils import log
 
 
-def create_warmup_linear_lambda(
-    f_start: float, f_min: float, f_max: float, warm_up_steps: int, cycle_lengths: int
-):
-    def lr_lambda(n: int) -> float:
-        if n < warm_up_steps:
-            if warm_up_steps > 0:
-                f = (f_max - f_start) / warm_up_steps * n + f_start
-            else:
-                f = f_max
-        elif n < cycle_lengths:
-            decay_steps = cycle_lengths - warm_up_steps
-            if decay_steps > 0:
-                f = f_min + (f_max - f_min) * (cycle_lengths - n) / decay_steps
-            else:
-                f = f_min
-        else:
-            f = f_min
-        return f
-
-    return lr_lambda
-
-
 class WarmupLinearScheduler(LambdaLR):
     def __init__(
         self,
@@ -53,16 +31,25 @@ class WarmupLinearScheduler(LambdaLR):
         warm_up_steps: int,
         cycle_lengths: int,
         last_epoch: int = -1,
-        verbose: bool = False,
+        verbose: str = "deprecated",
     ):
-        self.lr_lambda = create_warmup_linear_lambda(
-            f_start=f_start,
-            f_min=f_min,
-            f_max=f_max,
-            warm_up_steps=warm_up_steps,
-            cycle_lengths=cycle_lengths,
-        )
-        super().__init__(optimizer, self.lr_lambda, last_epoch, verbose)
+        def lr_lambda(n: int) -> float:
+            if n < warm_up_steps:
+                if warm_up_steps > 0:
+                    f = (f_max - f_start) / warm_up_steps * n + f_start
+                else:
+                    f = f_max
+            elif n < cycle_lengths:
+                decay_steps = cycle_lengths - warm_up_steps
+                if decay_steps > 0:
+                    f = f_min + (f_max - f_min) * (cycle_lengths - n) / decay_steps
+                else:
+                    f = f_min
+            else:
+                f = f_min
+            return f
+
+        super().__init__(optimizer, lr_lambda, last_epoch, verbose)
 
 
 class Predict2Video2WorldModelLightning(L.LightningModule):
@@ -350,7 +337,7 @@ model = Predict2Video2WorldModelLightning(
 )
 
 _dataset = LeRobotDataset(
-    episodes=[i for i in range(10)],
+    # episodes=[i for i in range(10)],
     repo_id="ZibinDong/bridgedatav2_train",
     root="/mnt/20T/datasets/bridgev2/lerobot/ZibinDong/bridgedatav2_train",
     delta_timestamps={
@@ -367,11 +354,13 @@ dataloader = torch.utils.data.DataLoader(
 callback = ModelCheckpoint(
     dirpath="checkpoints",
     filename="model-{epoch}-{step}",
-    # save_top_k=-1,
-    every_n_train_steps=1000,
+    save_top_k=-1,
+    every_n_train_steps=10_000,
 )
 
-policy = {Block,}
+policy = {
+    Block,
+}
 strategy = FSDPStrategy(auto_wrap_policy=policy, sharding_strategy="FULL_SHARD")
 
 trainer = L.Trainer(
