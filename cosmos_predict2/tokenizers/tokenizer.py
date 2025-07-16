@@ -583,15 +583,15 @@ def _video_vae(
                 backend_key=None,
                 map_location=device,
             )
-            if load_mean_std:
-                img_mean_std = mean_std_path.replace("mean_std.pt", "images_mean_std.pt")
-                video_mean_std = mean_std_path.replace("mean_std.pt", "video_mean_std.pt")
-                img_mean, img_std = easy_io.load(img_mean_std, backend_key=backend_key, map_location=device)
-                video_mean, video_std = easy_io.load(video_mean_std, backend_key=backend_key, map_location=device)
-                img_mean = img_mean.reshape(1, 16, 1, 1, 1)
-                img_std = img_std.reshape(1, 16, 1, 1, 1)
-                video_mean = video_mean.reshape(1, 16, 32, 1, 1)
-                video_std = video_std.reshape(1, 16, 32, 1, 1)
+            # if load_mean_std:
+            #     img_mean_std = mean_std_path.replace("mean_std.pt", "images_mean_std.pt")
+            #     video_mean_std = mean_std_path.replace("mean_std.pt", "video_mean_std.pt")
+            #     img_mean, img_std = easy_io.load(img_mean_std, backend_key=backend_key, map_location=device)
+            #     video_mean, video_std = easy_io.load(video_mean_std, backend_key=backend_key, map_location=device)
+            #     img_mean = img_mean.reshape(1, 16, 1, 1, 1)
+            #     img_std = img_std.reshape(1, 16, 1, 1, 1)
+            #     video_mean = video_mean.reshape(1, 16, 32, 1, 1)
+            #     video_std = video_std.reshape(1, 16, 32, 1, 1)
 
             # load checkpoint
             log.info(f"Loading {pretrained_path}")

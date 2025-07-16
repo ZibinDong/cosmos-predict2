@@ -6,15 +6,8 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from PIL import Image
 from torchvision.transforms.v2 import Resize
 
-from cosmos_predict2.configs.action_conditioned.config_action_conditioned import (
-    ACTION_CONDITIONED_PREDICT2_VIDEO2WORLD_PIPELINE_2B,
-)
 from cosmos_predict2.configs.base.config_video2world import (
-    PREDICT2_VIDEO2WORLD_PIPELINE_2B,
     PREDICT2_VIDEO2WORLD_PIPELINE_2B_DZB,
-)
-from cosmos_predict2.pipelines.action_video2world import (
-    SimpleActionConditionedVideo2WorldPipeline,
 )
 from cosmos_predict2.pipelines.video2world import SimpleVideo2WorldPipeline
 from imaginaire.utils.io import save_image_or_video

@@ -9,7 +9,7 @@ dependencies:
   - ninja
   - gcc=12.4.0
   - gxx=12.4.0
-  - cuda=12.4
-  - cuda-nvcc=12.4
-  - cuda-toolkit=12.4
+  # - cuda=12.4
+  # - cuda-nvcc=12.4
+  # - cuda-toolkit=12.4
   - libgl

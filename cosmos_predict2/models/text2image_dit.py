@@ -25,10 +25,6 @@ import transformer_engine as te
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from torch import nn
-from torch.distributed import ProcessGroup, get_process_group_ranks
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper as ptd_checkpoint_wrapper
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import fully_shard
 from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
 from torchvision import transforms
 from transformer_engine.pytorch.attention import DotProductAttention, apply_rotary_pos_emb
@@ -37,10 +33,7 @@ from cosmos_predict2.conditioner import DataType
 from cosmos_predict2.module.a2a_cp import MinimalA2AAttnOp
 from cosmos_predict2.networks.model_weights_stats import WeightTrainingStat
 from cosmos_predict2.networks.selective_activation_checkpoint import SACConfig as _SACConfig
-from cosmos_predict2.utils.context_parallel import split_inputs_cp
 from imaginaire.utils import log
-from imaginaire.utils.graph import create_cuda_graph
-
 
 # selective activation checkpoint; only apply to the minimal v4 model. if there are change in the networks, some policy will not work as we expect.
 def predict2_2B_720_context_fn():
@@ -370,21 +363,10 @@ class Attention(nn.Module):
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
         return self.compute_attention(q, k, v)
 
-    def set_context_parallel_group(
-        self, process_group: ProcessGroup, ranks: List[int], stream: torch.cuda.Stream
-    ) -> None:
-        self.attn_op.set_context_parallel_group(process_group, ranks, stream)
-
 
 class VideoPositionEmb(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self._cp_group = None
-
-    def enable_context_parallel(self, process_group: ProcessGroup) -> None:
-        self._cp_group = process_group
-
-    def disable_context_parallel(self) -> None:
         self._cp_group = None
 
     @property
@@ -397,22 +379,11 @@ class VideoPositionEmb(nn.Module):
         It delegates the embedding generation to generate_embeddings function.
         """
         B_T_H_W_C = x_B_T_H_W_C.shape
-        if self._cp_group is not None:
-            cp_ranks = get_process_group_ranks(self._cp_group)
-            cp_size = len(cp_ranks)
-            B, T, H, W, C = B_T_H_W_C
-            B_T_H_W_C = torch.Size((B, T * cp_size, H, W, C))
         embeddings = self.generate_embeddings(B_T_H_W_C, fps=fps)
-
         return self._split_for_context_parallel(embeddings)
 
     def generate_embeddings(self, B_T_H_W_C: torch.Size, fps: Optional[torch.Tensor]) -> Any:
         raise NotImplementedError
-
-    def _split_for_context_parallel(self, embeddings: torch.Tensor) -> torch.Tensor:
-        if self._cp_group is not None:
-            embeddings = split_inputs_cp(x=embeddings, seq_dim=self.seq_dim, cp_group=self._cp_group)
-        return embeddings
 
 
 class VideoRopePosition3DEmb(VideoPositionEmb):
@@ -1201,8 +1172,6 @@ class MiniTrainDIT(WeightTrainingStat):
         self.t_embedding_norm = RMSNorm(model_channels, eps=1e-6)
         
         self.init_weights()
-        self.enable_selective_checkpoint(sac_config)
-        self._is_context_parallel_enabled = False
 
     def init_weights(self) -> None:
         self.x_embedder.init_weights()
@@ -1376,20 +1345,20 @@ class MiniTrainDIT(WeightTrainingStat):
                 x_B_T_H_W_D.shape == extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D.shape
             ), f"{x_B_T_H_W_D.shape} != {extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D.shape}"
 
-        if use_cuda_graphs:
-            shapes_key = create_cuda_graph(
-                self.cuda_graphs,
-                self.blocks,
-                x_B_T_H_W_D,
-                t_embedding_B_T_D,
-                crossattn_emb,
-                rope_emb_L_1_1_D,
-                adaln_lora_B_T_3D,
-                extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D,
-            )
-            blocks = self.cuda_graphs[shapes_key]
-        else:
-            blocks = self.blocks
+        # if use_cuda_graphs:
+        #     shapes_key = create_cuda_graph(
+        #         self.cuda_graphs,
+        #         self.blocks,
+        #         x_B_T_H_W_D,
+        #         t_embedding_B_T_D,
+        #         crossattn_emb,
+        #         rope_emb_L_1_1_D,
+        #         adaln_lora_B_T_3D,
+        #         extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D,
+        #     )
+        #     blocks = self.cuda_graphs[shapes_key]
+        # else:
+        blocks = self.blocks
 
         block_kwargs = {
             "rope_emb_L_1_1_D": rope_emb_L_1_1_D,
@@ -1407,78 +1376,3 @@ class MiniTrainDIT(WeightTrainingStat):
         x_B_T_H_W_O = self.final_layer(x_B_T_H_W_D, t_embedding_B_T_D, adaln_lora_B_T_3D=adaln_lora_B_T_3D)
         x_B_C_Tt_Hp_Wp = self.unpatchify(x_B_T_H_W_O)
         return x_B_C_Tt_Hp_Wp
-
-    def enable_selective_checkpoint(self, sac_config: SACConfig):
-        if sac_config.mode == CheckpointMode.NONE:
-            pass
-        else:
-            log.debug(
-                f"Enable selective checkpoint with {sac_config.mode}, for every {sac_config.every_n_blocks} blocks. Total blocks: {len(self.blocks)}"
-            )
-            _context_fn = sac_config.get_context_fn()
-            for block_id, block in self.blocks.named_children():
-                if int(block_id) % sac_config.every_n_blocks == 0:
-                    log.debug(f"Enable selective checkpoint for block {block_id}")
-                    block = ptd_checkpoint_wrapper(
-                        block,
-                        context_fn=_context_fn,
-                        preserve_rng_state=False,
-                    )
-                    self.blocks.register_module(block_id, block)
-            self.register_module(
-                "final_layer",
-                ptd_checkpoint_wrapper(
-                    self.final_layer,
-                    context_fn=_context_fn,
-                    preserve_rng_state=False,
-                ),
-            )
-
-        return self
-
-    def fully_shard(self, mesh: DeviceMesh) -> None:
-        for i, block in enumerate(self.blocks):
-            reshard_after_forward = i < len(self.blocks) - 1
-            fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward)
-
-        fully_shard(self.final_layer, mesh=mesh, reshard_after_forward=True)
-        if self.extra_per_block_abs_pos_emb:
-            fully_shard(self.extra_pos_embedder, mesh=mesh, reshard_after_forward=True)
-        fully_shard(self.t_embedder, mesh=mesh, reshard_after_forward=True)
-
-    def disable_context_parallel(self) -> None:
-        # pos_embedder
-        self.pos_embedder.disable_context_parallel()
-        if self.extra_per_block_abs_pos_emb:
-            self.extra_pos_embedder.disable_context_parallel()
-
-        # attention
-        for block in self.blocks:
-            block.self_attn.set_context_parallel_group(
-                process_group=None,
-                ranks=None,
-                stream=torch.cuda.Stream(),
-            )
-
-        self._is_context_parallel_enabled = False
-
-    def enable_context_parallel(self, process_group: Optional[ProcessGroup] = None) -> None:
-        # pos_embedder
-        self.pos_embedder.enable_context_parallel(process_group=process_group)
-        if self.extra_per_block_abs_pos_emb:
-            self.extra_pos_embedder.enable_context_parallel(process_group=process_group)
-
-        # attention
-        cp_ranks = get_process_group_ranks(process_group)
-        for block in self.blocks:
-            block.self_attn.set_context_parallel_group(
-                process_group=process_group,
-                ranks=cp_ranks,
-                stream=torch.cuda.Stream(),
-            )
-
-        self._is_context_parallel_enabled = True
-
-    @property
-    def is_context_parallel_enabled(self) -> bool:
-        return self._is_context_parallel_enabled
