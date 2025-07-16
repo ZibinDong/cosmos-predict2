@@ -887,12 +887,12 @@ class Video2WorldPipeline(BasePipeline):
         uncondition = uncondition.edit_for_inference(
             is_cfg_conditional=False, num_conditional_frames=num_conditional_frames
         )
-        _, condition, _, _ = self.broadcast_split_for_model_parallelsim(
-            x0, condition, None, None
-        )
-        _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(
-            x0, uncondition, None, None
-        )
+        # _, condition, _, _ = self.broadcast_split_for_model_parallelsim(
+        #     x0, condition, None, None
+        # )
+        # _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(
+        #     x0, uncondition, None, None
+        # )
 
         def x0_fn(noise_x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
             cond_x0 = self.denoise(
@@ -1695,12 +1695,12 @@ class SimpleVideo2WorldPipeline(BasePipeline):
         uncondition = uncondition.edit_for_inference(
             is_cfg_conditional=False, num_conditional_frames=num_conditional_frames
         )
-        _, condition, _, _ = self.broadcast_split_for_model_parallelsim(
-            x0, condition, None, None
-        )
-        _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(
-            x0, uncondition, None, None
-        )
+        # _, condition, _, _ = self.broadcast_split_for_model_parallelsim(
+        #     x0, condition, None, None
+        # )
+        # _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(
+        #     x0, uncondition, None, None
+        # )
 
         def x0_fn(noise_x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
             cond_x0 = self.denoise(

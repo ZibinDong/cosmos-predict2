@@ -337,9 +337,9 @@ model = Predict2Video2WorldModelLightning(
 )
 
 _dataset = LeRobotDataset(
-    # episodes=[i for i in range(10)],
+    episodes=[i for i in range(10)],
     repo_id="ZibinDong/bridgedatav2_train",
-    root="/mnt/20T/datasets/bridgev2/lerobot/ZibinDong/bridgedatav2_train",
+    root="/openbayes/input/input0",
     delta_timestamps={
         "image": [i / 5 for i in range(29)],
     },
@@ -348,7 +348,7 @@ _dataset = LeRobotDataset(
 
 dataset = CosmosDatasetWrapper(_dataset)
 dataloader = torch.utils.data.DataLoader(
-    dataset, batch_size=2, num_workers=11, shuffle=True, persistent_workers=True
+    dataset, batch_size=1, num_workers=11, shuffle=True, persistent_workers=True
 )
 
 callback = ModelCheckpoint(

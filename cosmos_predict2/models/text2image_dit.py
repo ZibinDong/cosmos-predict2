@@ -380,7 +380,8 @@ class VideoPositionEmb(nn.Module):
         """
         B_T_H_W_C = x_B_T_H_W_C.shape
         embeddings = self.generate_embeddings(B_T_H_W_C, fps=fps)
-        return self._split_for_context_parallel(embeddings)
+        # return self._split_for_context_parallel(embeddings)
+        return embeddings
 
     def generate_embeddings(self, B_T_H_W_C: torch.Size, fps: Optional[torch.Tensor]) -> Any:
         raise NotImplementedError
