@@ -341,7 +341,7 @@ _dataset = LeRobotDataset(
     repo_id="ZibinDong/bridgedatav2_train",
     root="/openbayes/input/input0",
     delta_timestamps={
-        "image": [i / 5 for i in range(29)],
+        "image": [i / 5 for i in range(21)],
     },
     image_transforms=Resize((480, 480)),
 )
@@ -361,7 +361,7 @@ callback = ModelCheckpoint(
 policy = {
     Block,
 }
-strategy = FSDPStrategy(auto_wrap_policy=policy, sharding_strategy="FULL_SHARD")
+strategy = FSDPStrategy(auto_wrap_policy=policy, sharding_strategy="SHARD_GRAD_OP")
 
 trainer = L.Trainer(
     accelerator="cuda",

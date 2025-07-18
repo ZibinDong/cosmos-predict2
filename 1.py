@@ -1,7 +1,10 @@
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+import torch
 
-dataset = LeRobotDataset(
-    "ZibinDong/bridgedatav2_val",
-    root="/mnt/20T/datasets/bridgev2/lerobot/ZibinDong/bridgedatav2_val",
-    delta_timestamps={"action": [i/5 for i in range(12)]}
-)
+from cosmos_predict2.models.text2image_dit import Attention
+
+device = "cuda:0"
+m = Attention(64, head_dim=16, n_heads=4, backend="transformer_engine")
+m = m.to(device)
+
+
+x = torch.randn((2, 8, 64), device=device)
