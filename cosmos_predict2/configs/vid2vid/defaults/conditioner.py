@@ -185,6 +185,8 @@ class Vid2VidConditioner(GeneralConditioner):
         override_dropout_rate: Optional[Dict[str, float]] = None,
     ) -> Vid2VidCondition:
         output = super()._forward(batch, override_dropout_rate)
+        if "crossattn_emb" in batch.keys():
+            output['crossattn_emb'] = batch['crossattn_emb']
         return Vid2VidCondition(**output)
 
 

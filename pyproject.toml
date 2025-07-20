@@ -36,6 +36,9 @@ known_third_party = ["third_party"]
 skip = ["third_party"]
 line_length = 120
 
+[tool.ruff]
+line-length = 150
+
 [tool.black]
 line-length = 150
 target_version = ['py310']

@@ -104,7 +104,7 @@ PREDICT2_VIDEO2WORLD_NET_2B = L(MinimalV1LVGDiT)(
     model_channels=2048,
     num_blocks=28,
     num_heads=16,
-    atten_backend="minimal_a2a",
+    atten_backend="torch",
     # positional embedding settings
     pos_emb_cls="rope3d",
     pos_emb_learnable=True,
@@ -135,7 +135,7 @@ PREDICT2_VIDEO2WORLD_NET_2B_DZB = L(MinimalV1LVGDiT)(
     model_channels=2048,
     num_blocks=28,
     num_heads=16,
-    atten_backend="minimal_a2a",
+    atten_backend="torch",
     # positional embedding settings
     pos_emb_cls="rope3d",
     pos_emb_learnable=True,
