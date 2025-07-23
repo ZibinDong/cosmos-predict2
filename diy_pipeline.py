@@ -15,17 +15,17 @@ from imaginaire.utils.io import save_image_or_video
 with open("tasks_with_embeddings.pkl", "rb") as f:
     tasks_with_embeddings_pkl = pickle.load(f)
 
-dit_params = dict()
-tokenizer_params = dict()
-params = torch.load("checkpoints/model-epoch=0-step=100000.ckpt")["state_dict"]
-for k, v in params.items():
-    if k.startswith("pipe.dit."):
-        dit_params[k[9:]] = v
-    elif k.startswith("pipe.tokenizer."):
-        tokenizer_params[k[15:]] = v
-    else:
-        print(k)
-torch.save(dit_params, "checkpoints/dit_test.pt")
+# dit_params = dict()
+# tokenizer_params = dict()
+# params = torch.load("checkpoints/model-epoch=0-step=100000.ckpt")["state_dict"]
+# for k, v in params.items():
+#     if k.startswith("pipe.dit."):
+#         dit_params[k[9:]] = v
+#     elif k.startswith("pipe.tokenizer."):
+#         tokenizer_params[k[15:]] = v
+#     else:
+#         print(k)
+# torch.save(dit_params, "checkpoints/dit_test.pt")
 
 pipe = SimpleVideo2WorldPipeline.from_config(
     config=PREDICT2_VIDEO2WORLD_PIPELINE_2B_DZB,
@@ -36,13 +36,13 @@ pipe = SimpleVideo2WorldPipeline.from_config(
     add_lora=False,
 )
 task = ""
-pipe = pipe.to("cuda:0")
+pipe = pipe.to("cuda:0", dtype=torch.bfloat16)
 image_path = "assets/bridge_test.jpg"
 
 _emb = list(tasks_with_embeddings_pkl.values())[4]
 _key = list(tasks_with_embeddings_pkl.keys())[4]
 print(_key)
-_emb = tasks_with_embeddings_pkl[task]
+_emb = tasks_with_embeddings_pkl["Put the red object into the pot."]
 t5_text_embeddings = torch.zeros((1, 32, 1024))
 t5_text_embeddings[0, : _emb.shape[0], :] = torch.tensor(_emb)
 

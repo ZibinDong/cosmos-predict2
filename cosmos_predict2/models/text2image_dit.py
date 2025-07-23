@@ -388,6 +388,28 @@ class Attention(nn.Module):
         return self.compute_attention(q, k, v, attention_bias=attention_bias)
 
 
+class AttentionFiLM(Attention):
+    def __init__(self, x_dim: int, context_dim: int, qkv_format: str = "bshd", backend: str = "torch"):
+        super().__init__(
+            query_dim=x_dim,
+            context_dim=context_dim,
+            n_heads=1,
+            head_dim=x_dim,
+            qkv_format=qkv_format,
+            backend=backend,
+        )
+        self.output_proj = nn.Sequential(nn.Linear(x_dim, 256, bias=False), nn.SiLU(), nn.Linear(256, 2 * x_dim))
+        nn.init.zeros_(self.output_proj[2].weight)
+        nn.init.zeros_(self.output_proj[2].bias)
+        self.query = nn.Parameter(torch.randn((1, 1, x_dim)) / math.sqrt(x_dim))
+
+    def forward(self, context: torch.Tensor, attention_bias: torch.Tensor | None = None):
+        b = context.shape[0]
+        q = self.query.repeat(b, 1, 1)
+        params = super().forward(q, context, None, attention_bias).squeeze(1)
+        return torch.chunk(params, 2, -1)
+
+
 class VideoPositionEmb(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -1030,6 +1052,154 @@ class Block(nn.Module):
         result_B_T_H_W_D = self.mlp(normalized_x_B_T_H_W_D)
         x_B_T_H_W_D = x_B_T_H_W_D + gate_mlp_B_T_1_1_D * result_B_T_H_W_D
         return x_B_T_H_W_D
+    
+
+class BlockFiLM(nn.Module):
+    """
+    A transformer block that combines self-attention, cross-attention and MLP layers with AdaLN modulation.
+    Each component (self-attention, cross-attention, MLP) has its own layer normalization and AdaLN modulation.
+
+    Parameters:
+        x_dim (int): Dimension of input features
+        context_dim (int): Dimension of context features for cross-attention
+        num_heads (int): Number of attention heads
+        mlp_ratio (float): Multiplier for MLP hidden dimension. Default: 4.0
+        use_adaln_lora (bool): Whether to use AdaLN-LoRA modulation. Default: False
+        adaln_lora_dim (int): Hidden dimension for AdaLN-LoRA layers. Default: 256
+
+    The block applies the following sequence:
+    1. Self-attention with AdaLN modulation
+    2. Cross-attention with AdaLN modulation
+    3. MLP with AdaLN modulation
+
+    Each component uses skip connections and layer normalization.
+    """
+
+    def __init__(
+        self,
+        x_dim: int,
+        context_dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        use_adaln_lora: bool = False,
+        adaln_lora_dim: int = 256,
+        backend: str = "transformer_engine",
+    ):
+        super().__init__()
+        self.x_dim = x_dim
+        self.layer_norm_self_attn = nn.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6)
+        self.self_attn = Attention(x_dim, None, num_heads, x_dim // num_heads, qkv_format="bshd", backend=backend)
+
+        self.layer_norm_mlp = nn.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6)
+        self.mlp = GPT2FeedForward(x_dim, int(x_dim * mlp_ratio))
+
+        self.use_adaln_lora = use_adaln_lora
+        if self.use_adaln_lora:
+            self.adaln_modulation_self_attn = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(x_dim, adaln_lora_dim, bias=False),
+                nn.Linear(adaln_lora_dim, 3 * x_dim, bias=False),
+            )
+            self.adaln_modulation_mlp = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(x_dim, adaln_lora_dim, bias=False),
+                nn.Linear(adaln_lora_dim, 3 * x_dim, bias=False),
+            )
+        else:
+            self.adaln_modulation_self_attn = nn.Sequential(nn.SiLU(), nn.Linear(x_dim, 3 * x_dim, bias=False))
+            self.adaln_modulation_mlp = nn.Sequential(nn.SiLU(), nn.Linear(x_dim, 3 * x_dim, bias=False))
+            
+        self.film = AttentionFiLM(x_dim=x_dim, context_dim=context_dim, backend=backend)
+
+    def reset_parameters(self) -> None:
+        self.layer_norm_self_attn.reset_parameters()
+        self.layer_norm_mlp.reset_parameters()
+
+        if self.use_adaln_lora:
+            std = 1.0 / math.sqrt(self.x_dim)
+            torch.nn.init.trunc_normal_(self.adaln_modulation_self_attn[1].weight, std=std, a=-3 * std, b=3 * std)
+            torch.nn.init.trunc_normal_(self.adaln_modulation_mlp[1].weight, std=std, a=-3 * std, b=3 * std)
+            torch.nn.init.zeros_(self.adaln_modulation_self_attn[2].weight)
+            torch.nn.init.zeros_(self.adaln_modulation_mlp[2].weight)
+        else:
+            torch.nn.init.zeros_(self.adaln_modulation_self_attn[1].weight)
+            torch.nn.init.zeros_(self.adaln_modulation_mlp[1].weight)
+
+    def init_weights(self) -> None:
+        self.reset_parameters()
+        self.self_attn.init_weights()
+        self.mlp.init_weights()
+
+    def forward(
+        self,
+        x_B_T_H_W_D: torch.Tensor,
+        emb_B_T_D: torch.Tensor,
+        crossattn_emb: torch.Tensor,
+        rope_emb_L_1_1_D: Optional[torch.Tensor] = None,
+        adaln_lora_B_T_3D: Optional[torch.Tensor] = None,
+        extra_per_block_pos_emb: Optional[torch.Tensor] = None,
+        attention_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if extra_per_block_pos_emb is not None:
+            x_B_T_H_W_D = x_B_T_H_W_D + extra_per_block_pos_emb
+
+        if self.use_adaln_lora:
+            shift_self_attn_B_T_D, scale_self_attn_B_T_D, gate_self_attn_B_T_D = (
+                self.adaln_modulation_self_attn(emb_B_T_D) + adaln_lora_B_T_3D
+            ).chunk(3, dim=-1)
+            shift_mlp_B_T_D, scale_mlp_B_T_D, gate_mlp_B_T_D = (self.adaln_modulation_mlp(emb_B_T_D) + adaln_lora_B_T_3D).chunk(3, dim=-1)
+        else:
+            shift_self_attn_B_T_D, scale_self_attn_B_T_D, gate_self_attn_B_T_D = self.adaln_modulation_self_attn(emb_B_T_D).chunk(3, dim=-1)
+            shift_mlp_B_T_D, scale_mlp_B_T_D, gate_mlp_B_T_D = self.adaln_modulation_mlp(emb_B_T_D).chunk(3, dim=-1)
+
+        # Reshape tensors from (B, T, D) to (B, T, 1, 1, D) for broadcasting
+        shift_self_attn_B_T_1_1_D = rearrange(shift_self_attn_B_T_D, "b t d -> b t 1 1 d")
+        scale_self_attn_B_T_1_1_D = rearrange(scale_self_attn_B_T_D, "b t d -> b t 1 1 d")
+        gate_self_attn_B_T_1_1_D = rearrange(gate_self_attn_B_T_D, "b t d -> b t 1 1 d")
+
+        shift_mlp_B_T_1_1_D = rearrange(shift_mlp_B_T_D, "b t d -> b t 1 1 d")
+        scale_mlp_B_T_1_1_D = rearrange(scale_mlp_B_T_D, "b t d -> b t 1 1 d")
+        gate_mlp_B_T_1_1_D = rearrange(gate_mlp_B_T_D, "b t d -> b t 1 1 d")
+
+        B, T, H, W, D = x_B_T_H_W_D.shape
+
+        def _fn(_x_B_T_H_W_D, _norm_layer, _scale_B_T_1_1_D, _shift_B_T_1_1_D):
+            return _norm_layer(_x_B_T_H_W_D) * (1 + _scale_B_T_1_1_D) + _shift_B_T_1_1_D
+
+        normalized_x_B_T_H_W_D = _fn(
+            x_B_T_H_W_D,
+            self.layer_norm_self_attn,
+            scale_self_attn_B_T_1_1_D,
+            shift_self_attn_B_T_1_1_D,
+        )
+        result_B_T_H_W_D = rearrange(
+            self.self_attn(
+                # normalized_x_B_T_HW_D,
+                rearrange(normalized_x_B_T_H_W_D, "b t h w d -> b (t h w) d"),
+                None,
+                rope_emb=rope_emb_L_1_1_D,
+            ),
+            "b (t h w) d -> b t h w d",
+            t=T,
+            h=H,
+            w=W,
+        )
+        x_B_T_H_W_D = x_B_T_H_W_D + gate_self_attn_B_T_1_1_D * result_B_T_H_W_D
+
+        scale_context_B_D, shift_context_B_D = self.film(crossattn_emb, attention_bias)
+        scale_context_B_1_1_1_D = rearrange(scale_context_B_D, "b d -> b 1 1 1 d")
+        shift_context_B_1_1_1_D = rearrange(shift_context_B_D, "b d -> b 1 1 1 d")
+        x_B_T_H_W_D = (1. + scale_context_B_1_1_1_D) * x_B_T_H_W_D + shift_context_B_1_1_1_D
+
+        normalized_x_B_T_H_W_D = _fn(
+            x_B_T_H_W_D,
+            self.layer_norm_mlp,
+            scale_mlp_B_T_1_1_D,
+            shift_mlp_B_T_1_1_D,
+        )
+        result_B_T_H_W_D = self.mlp(normalized_x_B_T_H_W_D)
+        x_B_T_H_W_D = x_B_T_H_W_D + gate_mlp_B_T_1_1_D * result_B_T_H_W_D
+        return x_B_T_H_W_D
 
 
 class MiniTrainDIT(WeightTrainingStat):
@@ -1143,9 +1313,10 @@ class MiniTrainDIT(WeightTrainingStat):
 
         self.blocks = nn.ModuleList(
             [
-                Block(
+                BlockFiLM(
                     x_dim=model_channels,
-                    context_dim=crossattn_emb_channels,
+                    # context_dim=crossattn_emb_channels,
+                    context_dim=32,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
                     use_adaln_lora=use_adaln_lora,

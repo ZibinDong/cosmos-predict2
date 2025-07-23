@@ -22,7 +22,7 @@ from cosmos_predict2.configs.base.config_video2world import (
 from cosmos_predict2.models.text2image_dit import Block, FinalLayer
 from cosmos_predict2.pipelines.video2world import Video2WorldPipeline
 from cosmos_predict2.vqvae.mmdit import DualStreamTransformer
-from cosmos_predict2.vqvae.vq import CosVQ, CosVQ_EMA, CosVQ_Reactivation, SimVQ, VanillaVQ
+from cosmos_predict2.vqvae.vq import CosVQ, CosVQ_EMA, CosVQ_Reactivation, SimVQ, VanillaVQ, SimVQ_Usage, FSQ
 from imaginaire.utils import log
 
 
@@ -128,15 +128,18 @@ class Predict2Video2WorldModelLightning(L.LightningModule):
             self.pipe.tokenizer.requires_grad_(False)
 
         self.pipe = self.pipe.to(dtype=torch.bfloat16)
-        self.encoder = DualStreamTransformer(latent_action_dim=128, num_action_tokens=self.num_action_tokens, model_channels=384, num_blocks=4).to(
+        self.encoder = DualStreamTransformer(latent_action_dim=32, num_action_tokens=self.num_action_tokens, model_channels=384, num_blocks=4).to(
             dtype=torch.bfloat16
         )
-        self.vq = VanillaVQ(codebook_size=256, embedding_dim=128, beta=0.25).to(dtype=torch.bfloat16)
-        self.vq_proj = nn.Linear(128, 1024).to(dtype=torch.bfloat16)
-        # self.vq_proj = nn.Identity()
+        self.vq = SimVQ_Usage(codebook_size=512, embedding_dim=32, beta=0.25).to(dtype=torch.bfloat16)
+        # self.vq = FSQ(levels=[8, 5, 5, 5]).to(dtype=torch.bfloat16)
+        # self.vq_proj = nn.Linear(64, 1024).to(dtype=torch.bfloat16)
+        self.vq_proj = nn.Identity()
 
         self.pipe.denoising_model().requires_grad_(False)
         self.pipe.tokenizer.requires_grad_(False)
+        for block in self.pipe.dit.blocks:
+            block.film.requires_grad_(True)
 
     def add_lora_to_model(
         self,
@@ -262,8 +265,9 @@ class Predict2Video2WorldModelLightning(L.LightningModule):
         x0_B_C_T_H_W = self.pipe.encode(batch["video"]).contiguous().float()
 
         z = self.encoder(x0_B_C_T_H_W)
-        z_q, commit_loss, perplexity = self.vq(z)
-        action_embedding = self.vq_proj(z)
+        z_q, commit_loss, perplexity, entropy = self.vq(z)
+        action_embedding = self.vq_proj(z_q)
+            
         batch["crossattn_emb"] = action_embedding
 
         condition = self.pipe.conditioner(batch)
@@ -294,24 +298,30 @@ class Predict2Video2WorldModelLightning(L.LightningModule):
         self.log("diff_loss", kendall_loss.item(), prog_bar=True)
         self.log("commit_loss", commit_loss.item(), prog_bar=True)
         self.log("perplexity", perplexity.item(), prog_bar=True)
-        # self.log("entropy", entropy.item(), prog_bar=True)
+        self.log("entropy", entropy.item(), prog_bar=True)
         # self.log("min_prob", min_prob.item(), prog_bar=True)
         self.log("lr", self.optimizers().param_groups[0]["lr"])
+        
+        # # add commit loss after 100 steps
+        # if self.global_step > 100:
+        #     alpha = 1.0
+        # else:
+        #     alpha = 0.0
 
-        #     return kendall_loss + commit_loss - entropy
-        return kendall_loss
+        return kendall_loss + commit_loss
+        # return kendall_loss
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=1e-4,
             weight_decay=1e-3,
-            betas=(0.9, 0.99),
+            betas=(0.9, 0.95),
         )
         scheduler = WarmupLinearScheduler(
             optimizer=optimizer,
             f_start=1.0,
-            f_min=1.0,
+            f_min=0.1,
             f_max=1.0,
             warm_up_steps=1000,
             cycle_lengths=100_000,

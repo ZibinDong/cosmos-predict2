@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from imaginaire.utils import log
+import math
 
 
 class SimVQ(nn.Module):
@@ -45,6 +46,102 @@ class SimVQ(nn.Module):
         return z_q, commit_loss, perplexity
 
 
+class SimVQ_Usage(nn.Module):
+    """
+    SimVQ module with Exponential Moving Average (EMA) tracking for codebook usage.
+    """
+
+    def __init__(self, codebook_size: int = 8192, embedding_dim: int = 128, beta: float = 0.25, ema_decay: float = 0.99):
+        """
+        Args:
+            codebook_size (int): The number of codes in the codebook.
+            embedding_dim (int): The dimensionality of the embeddings.
+            beta (float): The commitment loss weight.
+            ema_decay (float): The decay factor for the EMA update of codebook usage.
+        """
+        super().__init__()
+        self.beta = beta
+        self.codebook_size = codebook_size
+        self.embedding_dim = embedding_dim
+        self.ema_decay = ema_decay
+
+        # --- Codebook Embeddings ---
+        self.embedding = nn.Embedding(codebook_size, embedding_dim)
+        nn.init.normal_(self.embedding.weight, mean=0, std=embedding_dim**-0.5)
+        # The base codebook is not trained directly
+        for p in self.embedding.parameters():
+            p.requires_grad = False
+
+        # --- Projection Layer ---
+        # A linear projection is applied to the codebook before use
+        self.embedding_proj = nn.Linear(embedding_dim, embedding_dim)
+
+        # --- EMA Buffer for Codebook Usage ---
+        # Initialize the EMA buffer for codebook usage with a uniform distribution.
+        # `register_buffer` makes it part of the module's state, but not a trainable parameter.
+        initial_usage = torch.ones(codebook_size) / codebook_size
+        self.register_buffer("ema_codebook_usage", initial_usage)
+
+    def forward(self, z: torch.Tensor):
+        """
+        Forward pass of the SimVQ module.
+
+        Args:
+            z (torch.Tensor): The input tensor from the encoder, shape `(B, ..., D)`.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            - z_q (torch.Tensor): The quantized output tensor, same shape as z.
+            - commit_loss (torch.Tensor): The commitment loss.
+            - perplexity (torch.Tensor): The perplexity of the codebook usage for the current batch.
+            - ema_entropy (torch.Tensor): The entropy of the EMA of codebook usage.
+        """
+        assert z.shape[-1] == self.embedding_dim
+
+        # Flatten input tensor to (Batch*H*W, Dim)
+        z_flattened = z.view(-1, self.embedding_dim)
+
+        # The actual codebook used for quantization is the projected one
+        quant_codebook = self.embedding_proj(self.embedding.weight)
+
+        # Calculate distances: (z - e)^2 = z^2 + e^2 - 2*z*e
+        d = (
+            torch.sum(z_flattened**2, dim=1, keepdim=True)
+            + torch.sum(quant_codebook**2, dim=1)
+            - 2 * torch.einsum("bd,dn->bn", z_flattened, einops.rearrange(quant_codebook, "n d -> d n"))
+        )
+
+        # Find the closest codebook vectors
+        min_encoding_indices = torch.argmin(d, dim=1)
+
+        # Quantize the input tensor
+        z_q = F.embedding(min_encoding_indices, quant_codebook).view(z.shape)
+
+        # --- Update EMA and Calculate Metrics ---
+
+        # 1. Calculate the empirical distribution for the current batch
+        codebook_counts = torch.bincount(min_encoding_indices, minlength=self.codebook_size)
+        e_mean = codebook_counts.float() / min_encoding_indices.numel()
+
+        # 2. Update the EMA of codebook usage (in-place)
+        with torch.no_grad():
+            self.ema_codebook_usage.mul_(self.ema_decay).add_(e_mean, alpha=1 - self.ema_decay)
+
+        # 3. Calculate the entropy of the EMA distribution: H(p) = -Σ p_i * log(p_i)
+        ema_entropy = -torch.sum(self.ema_codebook_usage * torch.log(self.ema_codebook_usage + 1e-10))
+
+        # 4. Calculate perplexity for the current batch
+        perplexity = torch.exp(-torch.sum(e_mean * torch.log(e_mean + 1e-10)))
+
+        # --- Loss Calculation ---
+        commit_loss = self.beta * torch.mean((z_q.detach() - z) ** 2) + torch.mean((z_q - z.detach()) ** 2)
+
+        # Use straight-through estimator for gradients
+        z_q = z + (z_q - z).detach()
+
+        return z_q, commit_loss, perplexity, ema_entropy
+
+
 class VanillaVQ(nn.Module):
     def __init__(self, codebook_size: int = 8192, embedding_dim: int = 128, beta: float = 0.25):
         super().__init__()
@@ -79,6 +176,96 @@ class VanillaVQ(nn.Module):
         return z_q, commit_loss, perplexity
 
 
+class FSQ(nn.Module):
+    """
+    Finite Scalar Quantization (FSQ) - Final Corrected Implementation
+    
+    This implementation strictly follows the user's specified procedure:
+    tanh -> scale by L/2 -> floor -> STE on round(floor(z)).
+    """
+    def __init__(self, levels: list[int]):
+        """
+        Initializes the FSQ module.
+        
+        Args:
+            levels (list[int]): A list of integers specifying the number of
+                                quantization levels for each dimension.
+        """
+        super().__init__()
+        
+        self.embedding_dim = len(levels)
+        self.codebook_size = math.prod(levels)
+        
+        # Register levels as a buffer for automatic device placement
+        self.register_buffer("levels", torch.tensor(levels, dtype=torch.float))
+        
+        # Pre-calculate the offset for index conversion. For levels L, indices are
+        # calculated from quantized values by adding an offset of floor(L/2).
+        self.register_buffer("index_offset", torch.floor(self.levels / 2))
+        
+        # Pre-compute bases for converting multi-dimensional indices to a single flat index.
+        # This is used for perplexity calculation.
+        _bases = [math.prod(levels[i+1:]) for i in range(len(levels)-1)] + [1]
+        self.register_buffer("_bases", torch.tensor(_bases, dtype=torch.long))
+
+    def forward(self, z: torch.Tensor):
+        """
+        Quantizes the input tensor z following the specified steps.
+        
+        Args:
+            z (torch.Tensor): The input tensor from the encoder, shape (..., embedding_dim).
+            
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            - z_q (torch.Tensor): The quantized tensor with STE, shape is the same as z.
+            - indices (torch.Tensor): The integer indices of the quantized vectors.
+            - perplexity (torch.Tensor): A measure of codebook usage.
+        """
+        # Step 1: Dimension Check
+        assert z.shape[-1] == self.embedding_dim, \
+            f"Input embedding dim {z.shape[-1]} must match FSQ dim {self.embedding_dim}"
+        
+        # Step 2: Tanh Normalization
+        z_tanh = torch.tanh(z)
+        
+        # Step 3: Scale by L/2
+        x = z_tanh * torch.floor(self.levels / 2)
+
+        # Step 5: Round x for quantization target and apply STE
+        x_quantized = torch.round(x) # This is the actual discrete quantized value
+        z_q = x + (x_quantized - x).detach() # The STE formula you specified
+        
+        z_q = z_q / self.levels  # Normalize back to the range [0, 1] for each dimension
+        
+        # Step 6: Calculate indices from the quantized values
+        # Add offset to make indices non-negative
+        indices_unclamped = (x_quantized + self.index_offset).long()
+        
+        # Clamp indices to the valid range [0, L-1] for each dimension
+        zeros = torch.zeros_like(self.levels, dtype=torch.long)
+        max_indices = (self.levels - 1).long()
+        indices_per_dim = torch.max(torch.min(indices_unclamped, max_indices), zeros)
+        
+        # --- Metrics Calculation ---
+        
+        # Step 7: Calculate Perplexity
+        # Flatten spatial/batch dimensions for index and perplexity calculation
+        original_shape = indices_per_dim.shape
+        indices_per_dim_flat = indices_per_dim.view(-1, self.embedding_dim)
+
+        # Convert multi-dimensional indices to a single flat index
+        flat_indices = torch.sum(indices_per_dim_flat * self._bases, dim=1)
+        
+        codebook_counts = torch.bincount(flat_indices, minlength=self.codebook_size)
+        e_mean = codebook_counts.float() / flat_indices.numel()
+        perplexity = torch.exp(-torch.sum(e_mean * torch.log(e_mean + 1e-8)))
+        
+        # Reshape indices to have the same non-channel dimensions as the input
+        indices = flat_indices.view(*original_shape[:-1])
+
+        return z_q, indices, perplexity
+
+
 class CosVQ(nn.Module):
     def __init__(self, codebook_size: int = 8192, embedding_dim: int = 128, beta: float = 0.25, temperature: float = 0.1):
         super().__init__()
@@ -107,7 +294,7 @@ class CosVQ(nn.Module):
         e_mean = codebook_counts.float() / min_encoding_indices.numel()
         perplexity = torch.exp(-torch.sum(e_mean * torch.log(e_mean + 1e-8)))
 
-        commit_loss = torch.mean((z_q.detach() - z) ** 2) + self.beta * torch.mean((z_q - z.detach()) ** 2)
+        commit_loss = self.beta * torch.mean((z_q.detach() - z) ** 2) + torch.mean((z_q - z.detach()) ** 2)
         z_q = z + (z_q - z).detach()
 
         p_logits = cos_sim_scores / self.temperature

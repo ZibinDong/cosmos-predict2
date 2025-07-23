@@ -437,7 +437,7 @@ class Video2WorldPipeline(BasePipeline):
             log.info(f"Loading DiT from {dit_path}")
         else:
             log.warning("dit_path not provided, initializing DiT with random weights")
-        with init_weights_on_device():
+        with init_weights_on_device(device=device):
             dit_config = config.net
             pipe.dit = instantiate(dit_config).eval()  # inference
 
@@ -1240,7 +1240,7 @@ class SimpleVideo2WorldPipeline(BasePipeline):
             log.info(f"Loading DiT from {dit_path}")
         else:
             log.warning("dit_path not provided, initializing DiT with random weights")
-        with init_weights_on_device():
+        with init_weights_on_device(device=device):
             dit_config = config.net
             pipe.dit = instantiate(dit_config).eval()  # inference
 
